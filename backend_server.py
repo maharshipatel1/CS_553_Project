@@ -7,7 +7,7 @@ MAX_EVENTS = 100
 BUFFER = 1024
 EXIT = 1
 HOST = socket.gethostbyname(socket.gethostname())  # Get the IP address of the current machine
-PORT = 8032
+PORT = 8033
 RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nHello, world!\r\n"
 
 # Creating a new server socket for this backend server

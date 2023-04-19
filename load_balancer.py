@@ -6,7 +6,7 @@ import random
 from itertools import cycle
 
 HOST = socket.gethostbyname(socket.gethostname())  # Get the IP address of the current machine
-PORT = 8029
+PORT = 8030
 MAX_EVENTS = 100
 BUFFER = 1024
 RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nHello, world!\r\n"
@@ -33,7 +33,6 @@ class LoadBalancer(object):
 
     flow_table = dict()
     sockets = list()
-    map_fd = {}
     
     # Initializng the attributes of our load balancer
     def __init__(self, algorithm='random'):
@@ -42,7 +41,8 @@ class LoadBalancer(object):
         
         # Creating the load balancer's socket
         try: 
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) 
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
         except socket.error as e: 
             print ("Error CREATING socket: {}".format(e)) 
             sys.exit(1)
@@ -65,17 +65,13 @@ class LoadBalancer(object):
         print("Server is listening at IP: {} Port: {}....".format(HOST,PORT))
         print("\n")
         
-        # Create an epoll instance
-        try:
-            self.epoll = select.epoll()
-            self.epoll.register(self.server_socket.fileno(), select.EPOLLIN)
-        except OSError as e:
-            print("Error in epoll instance: {}".format(e))
-            sys.exit(1)
+        # Adding the newly created socket to the sockets list that select will use
+        self.sockets.append(self.server_socket)
     
     # A function that handles all new incoming connections
     # new conncention can be from any side = client or backened server
     def new_connection(self):
+    
         try:
             client_socket, client_address = self.server_socket.accept()  
         except socket.error as e:
@@ -99,55 +95,62 @@ class LoadBalancer(object):
             client_socket.close()
             return
         
-        # Setting the client socket to non-blocking
-        client_socket.setblocking(0)
+        # Adding the newly created socket to the list of sockets so that select() can trigger the requests
+        self.sockets.append(client_socket)
+        self.sockets.append(ss_socket)
         
         # Populating the flow table and the (client socket, server socket) mapping
-        self.map_fd[client_socket.fileno()] = client_socket
-        self.map_fd[ss_socket.fileno()] = ss_socket
-        self.flow_table[client_socket.fileno()] = ss_socket.fileno()
-        self.flow_table[ss_socket.fileno()] = client_socket.fileno()
-
-        # Epoll instance monitoring server-side socket to recieve data
-        self.epoll.register(ss_socket.fileno(), select.EPOLLIN | select.EPOLLET)
-        
-        # Epoll instanec monitoring client-side socket to recieve data
-        self.epoll.register(client_socket.fileno(), select.EPOLLIN)
+        self.flow_table[client_socket] = ss_socket
+        self.flow_table[ss_socket] = client_socket
 
         
         print("New CLIENT connection from {} on socket: {}".format(client_address,client_socket.fileno()))
         print("New connection with BACKEND SERVER {} on socket: {}".format((server_ip,server_port),ss_socket.fileno()))
 
-
-        # self.sockets.append(client_socket)
-        # self.sockets.append(ss_socket)
-
         
     # A function that handles incoming data on a socket
-    def on_recv(self,fd, msg):
+    def on_recv(self, sock, data):
         
         # incoming message = request from CLIENT -> we need to forward it to the selected server 
         # Stateful scenario -> Identify cookie from data here and take action accordingly
-        # ss_fd = self.flow_table[fd]
         
-        ss_socket = self.map_fd[self.flow_table[fd]]
+        send_to_socket = self.flow_table[sock]
+        
         try:
-            print("Forwarding packets from socket: {} to socket: {}".format(fd,ss_socket.fileno()))
-            ss_socket.send(msg)
+            send_to_socket.send(data)
+            print("Sending data to {} at {}".format(send_to_socket.getsockname(), send_to_socket.getpeername()))
         except socket.error as e:
             if e.errno == errno.EWOULDBLOCK:
                 pass
             else:
                 raise
+                
+    # A function that handles closing a connection
+    def on_close(self, sock):
+        
+        # Getting the closed socket from the mapping
+        ss_socket = flow_table[sock]
+        
+        # Removing both sockets from the list of sockets so that they don't interfere with the select()
+        self.sockets.remove(sock)
+        self.sockets.remove(ss_sock)
+        
+        # Finally closing the sockets
+        sock.close()
+        ss_socket.close()
+        
+        # Clearing the flow table entry
+        del self.flow_table[sock]
+        del self.flow_table[ss_sock]
            
     # A function that selects a backend server based on the selected policy    
     def select_server(self, server_list, algorithm):
-            if algorithm == 'random':
-                return random.choice(server_list)
-            elif algorithm == 'round robin':
-                return round_robin(ITER)
-            else:
-                raise Exception('unknown algorithm: {}'.format(algorithm) )
+        if algorithm == 'random':
+            return random.choice(server_list)
+        elif algorithm == 'round robin':
+            return round_robin(ITER)
+        else:
+            raise Exception('unknown algorithm: {}'.format(algorithm))
 
 
     # The main exectution of the load balancer
@@ -155,62 +158,39 @@ class LoadBalancer(object):
         try:
         
             while True:
-            
-                try:
-                    events = self.epoll.poll(MAX_EVENTS)
-                except OSError as e:
-                    print ("Error NO ready events: {}".format(e)) 
-                    sys.exit(1)
-
-                for fileno, event in events:
                 
-                    # Handling new connections
-                    if fileno == self.server_socket.fileno():
-                        # onaccept(function) and choosing server and create connection to the selected server
-                        self.new_connection()
+                # Creating the select instance
+                read_list, write_list, exception_list = select.select(self.sockets, [], [])
+                
+                # When there is socket in the read list
+                for sock in read_list:
                     
-                    # Handling incoming data    
+                    # Check if it is a new connection
+                    if sock == self.server_socket:
+                        
+                        self.new_connection()
+                        break
+                    
+                    # If it is a message from an already connected client
                     else:
-
-                        data = b""
                         
-                        while True:
-                        
-                            try:
-                                chunk = self.map_fd[fileno].recv(BUFFER)
-                                
-                                # exit from loop when all data is received
-                                if not chunk:
-                                    break
-                                data += chunk
-
-                            except socket.error as e:
-                                if e.errno == errno.EWOULDBLOCK:
-                                    break
-                                else:
-                                    raise
-                        
-                        # If new data is successfully received
-                        if data:
+                        try:
+                            data = sock.recv(BUFFER)
                             
-                            print("Read Data: {}".format(data))
-                            self.on_recv(fileno,data)
-                            # map_fd[fileno].send(RESPONSE)
-                        
-                        # Else closing the connection    
-                        else:
-                            print("Closing Connection with client and backend server on socket {} and {}".format(self.flow_table[fileno],fileno))
-                            self.map_fd[fileno].close()
-                            self.map_fd[self.flow_table[fileno]].close()
-
-                            del self.flow_table[self.flow_table[fileno]]
-                            del self.flow_table[fileno]
-
+                            # If we successfully recieved data
+                            if data:
+                                self.on_recv(sock, data)
+                            # If no data is received then closing the socket
+                            else:
+                                self.on_close(sock)
+                                break
+                       
+                        except:
+                            self.on_close(sock)
+                            break
         
         # Closing all the allocated resources
         finally:
-            self.epoll.unregister(self.server_socket.fileno())
-            self.epoll.close()
             self.server_socket.close()
 
     
