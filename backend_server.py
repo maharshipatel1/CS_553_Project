@@ -34,30 +34,22 @@ except socket.error as e:
 print("Server is listening at IP: {} Port: {}....".format(HOST,PORT))
 print("\n")
 
-# Creating an epoll instance
-try:
-    epoll = select.epoll()
-    epoll.register(server_socket.fileno(), select.EPOLLIN)
-except OSError as e:
-    print("Error in epoll instance: {}".format(e))
-    sys.exit(1)
+
+# Creating a list of connections that select() can trigger when a connection is recieved
+connections = list()
+connections.append(server_socket)
 
 # The main execution of the server
 try:
-    connections = {}
     while True:
-        
-        # Setting the number of max connections
-        try:
-            events = epoll.poll(MAX_EVENTS)
-        except OSError as e:
-            print ("Error NO ready events: {}".format(e)) 
-            sys.exit(1)
+                
+        # Creating the select instance
+        read_list, write_list, exception_list = select.select(connections, [], [])
             
-        for fileno, event in events:
+        for sock in read_list:
             
             # Handle new connections
-            if fileno == server_socket.fileno():
+            if sock == server_socket:
                 # onaccept(function) and choosing server and create connection to the selected server
                 
                 try:
@@ -65,65 +57,43 @@ try:
                 except socket.error as e:
                     print("Can't establish connection with client: {}".format(e))
 
-                # Setting the new connection as unblocking and adding it to the list of open connections
-                client_connection.setblocking(0)
-                client_fd = client_connection.fileno()
-                epoll.register(client_fd, select.EPOLLIN)
-                connections[client_fd] = client_connection
+                # Adding the client connection to the list of open connections
+                connections.append(client_connection)
 
-                print("New Client connection from {} on socket: {}".format(client_address,client_fd))
+                print("New Client connection from {}".format(client_address))
 
             # Handle incoming data from the load balancer
-            elif event & select.EPOLLIN:
+            else:
                 
-                data = b""
                 while True:
                     
                     # Reading the incoming data from the load balancer
                     try:
-                        chunk = connections[fileno].recv(BUFFER)
-                        # exit from loop when all data is received
-                        if not chunk:
-                            break
-                        data += chunk
-
-                    except socket.error as e:
-                        if e.errno == errno.EWOULDBLOCK:
-                            break
+                        data = sock.recv(BUFFER)
+                                
+                        # If we successfully recieved data, then we print it and send the response back to the load balancer
+                        if data:
+                            print(data)
+                            sock.send(RESPONSE)
+                            print("Sending data from {} to {}".format(sock.getsockname(), sock.getpeername()))
+                                
+                        # If no data is received then closing the socket
                         else:
-                            raise
-                
-                # If we successfully recieve data, then we forward it to the backend server
-                if data:
-                    print("Read Data: {}".format(data))
-                    print("Sending Response....")
-                    connections[fileno].send(RESPONSE)
-                    epoll.modify(fileno, select.EPOLLOUT)
-                    
-            # Handle outgoing data from the backend server
-            elif event & select.EPOLLOUT:
-                # respond back to client
-                # Handle outgoing data
-                # try:
-                    
-                #     connections[fileno].sendall(RESPONSE)
-                # except socket.error as e:
-                #     if e.errno == errno.EWOULDBLOCK:
-                #         pass
-                #     else:
-                #         raise
-                print("Closing Connection with client on socket {}".format(fileno))
-                connections[fileno].close()
-                print("\n")
-            
-            # Handling connection hang up    
-            elif event & select.EPOLLHUP:
-                epoll.unregister(fileno)
-                connections[fileno].close()
-                del connections[fileno]
+                            # Removing the socket from the list of sockets so that they don't interfere with the select()
+                            connections.remove(sock)
+        
+                            # Finally closing the socket
+                            sock.close()
+                            break
+                       
+                    except:
+                        # Removing the socket from the list of sockets so that they don't interfere with the select()
+                        connections.remove(sock)
+        
+                        # Finally closing the socket
+                        sock.close()
+                        break
 
 # Closing all of the allocated resources                
 finally:
-    epoll.unregister(server_socket.fileno())
-    epoll.close()
     server_socket.close()

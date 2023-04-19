@@ -29,10 +29,14 @@ class LoadBalancer(object):
     Notes:-
     flow_table is a dictionary that stores the mapping from the client socket to the server side socket
     sockets is a list that stores the currently connected and open server side sockets
+    client sockets is a list that stores all client sockets that are currently open
+    server_sockets is a list that stores all backend server sockets that are currently open
     """
 
     flow_table = dict()
     sockets = list()
+    client_sockets = list()
+    server_sockets = list()
     
     # Initializng the attributes of our load balancer
     def __init__(self, algorithm='random'):
@@ -79,7 +83,7 @@ class LoadBalancer(object):
 
         # selecting a backend server (IP address) based on the selected algorithm
         server_ip = self.select_server(SERVER_POOL, self.algorithm)
-        server_port = 8032
+        server_port = 8033
         
         # Creating a new server-side socket
         # Instantiating socket on load balancer in order to connect to the backend server
@@ -102,6 +106,9 @@ class LoadBalancer(object):
         # Populating the flow table and the (client socket, server socket) mapping
         self.flow_table[client_socket] = ss_socket
         self.flow_table[ss_socket] = client_socket
+        
+        self.server_sockets.append(ss_socket)
+        self.client_sockets.append(client_socket)
 
         
         print("New CLIENT connection from {} on socket: {}".format(client_address,client_socket.fileno()))
@@ -118,7 +125,7 @@ class LoadBalancer(object):
         
         try:
             send_to_socket.send(data)
-            print("Sending data to {} at {}".format(send_to_socket.getsockname(), send_to_socket.getpeername()))
+            print("Sending data from {} to {}".format(send_to_socket.getsockname(), send_to_socket.getpeername()))
         except socket.error as e:
             if e.errno == errno.EWOULDBLOCK:
                 pass
@@ -134,6 +141,8 @@ class LoadBalancer(object):
         # Removing both sockets from the list of sockets so that they don't interfere with the select()
         self.sockets.remove(sock)
         self.sockets.remove(ss_sock)
+        self.client_sockets.remove(sock)
+        self.server_sockets.remove(ss_sock)
         
         # Finally closing the sockets
         sock.close()
@@ -172,7 +181,7 @@ class LoadBalancer(object):
                         break
                     
                     # If it is a message from an already connected client
-                    else:
+                    elif sock in self.client_sockets:
                         
                         try:
                             data = sock.recv(BUFFER)
@@ -180,6 +189,24 @@ class LoadBalancer(object):
                             # If we successfully recieved data
                             if data:
                                 self.on_recv(sock, data)
+                            # If no data is received then closing the socket
+                            else:
+                                self.on_close(sock)
+                                break
+                       
+                        except:
+                            self.on_close(sock)
+                            break
+                            
+                    # If it is a message from the backend servers
+                    elif sock in self.server_sockets:
+                        
+                        try:
+                            data = sock.recv(BUFFER)
+                            
+                            # If we successfully recieved data
+                            if data:
+                                print(data)
                             # If no data is received then closing the socket
                             else:
                                 self.on_close(sock)
