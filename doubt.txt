@@ -1,0 +1,53 @@
+    """ Socket implementation of a load balancer.
+    Flow Diagram:
+    +---------------+      +-----------------------------------------+      +---------------+
+    | client socket | <==> | client-side socket | server-side socket | <==> | server socket |
+    |   <client>    |      |          < load balancer >              |      |    <server>   |
+    +---------------+      +-----------------------------------------+      +---------------+
+    Attributes:
+        ip (str): virtual server's ip; client-side socket's ip
+        port (int): virtual server's port; client-side socket's port
+        algorithm (str): algorithm used to select a server
+        flow_table (dict): map_fdping of client socket obj <==> server-side socket obj
+        sockets (list): current connected and open socket obj
+    """
+
+Current Flow:
+
+1. Client sends Request
+2. Load Balancer receives request => Event generated in load balancer 
+=> Event handler HANDLES NEW CONNECTION (function name: new_connection())
+-> a)  creates a new CLIENT_side socket => sets it to non-blocking and registers in epoll interest_list to monitor EPOLLIN | EPOLLET [i.e incoming data and edge based trigger]
+-> b)  selects a backend_server depending on the chosen algorithm (function name: select_server())
+-> c)  creates a new SERVER_side socket with the selected server=> sets it to non-blocking and registers in epoll interest_list to monitor EPOLLIN | EPOLLET [i.e incoming data and edge based trigger]
+3. REQUEST DATA is received from client or RESPONSE data is received from Backend server
+=> EPOLLIN triggered -> Event Handler -> (function name: on_recv())
+-> a)  reads ALL data 
+-> b)  if there is data FORWARD/SEND it to client or server depending on wheather it is a request or response [flow_table; dict()]
+-> c)  if it is a response => close all sockets after forwarding the response.
+
+In the flash paper it was mentioned: "A SPED server can be thought of as a state machine that performs one BASIC step associated with the serving of an HTTP request at a time, thus interleaving the processing
+steps associated with many HTTP requests" => "When an I/O event is ready, it completes the corresponding BASIC step and initiates the next step associated with the HTTP request,if appropriate."
+
+DOUBT1: In our implementation, we can clearly see our event handler is doing much more than a BASIC operation. We know that Event-based servers enable fine-grained control over the scheduling of 
+tasks but how can we use event-based programming to improve the efficiency of our current load balancer?
+DOUBT2: How does one use EPOLLOUT with EPOLLET to send data?
+
+Current specs using wrk2:
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.59s     1.47s    5.98s    73.16%
+    Req/Sec   692.96    244.47     1.09k    63.77%
+
+ Latency Distribution (HdrHistogram - Recorded Latency)
+ 50.000%    1.28s 
+ 75.000%    2.48s 
+ 90.000%    4.01s 
+ 99.000%    5.53s 
+ 99.900%    5.96s 
+ 99.990%    5.98s 
+ 99.999%    5.99s 
+100.000%    5.99s 
+
+  46571 requests in 30.01s, 2.62MB read
+Requests/sec:   1552.00
+Transfer/sec:    89.42KB
