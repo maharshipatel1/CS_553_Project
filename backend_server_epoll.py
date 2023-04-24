@@ -7,17 +7,17 @@ MAX_EVENTS = 100
 BUFFER = 200
 EXIT = 1
 HOST = socket.gethostbyname(socket.gethostname())  # Get the IP address of the current machine
-PORT = 8050
+PORT = 8030
 RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nHello, world!\r\n"
 
-
+# Creating a new server socket for this backend server
 try: 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) 
 except socket.error as e: 
     print ("Error CREATING socket: {}".format(e)) 
     sys.exit(1)
 
-# Bind the socket to a specific address and port
+# Binding the socket to a specific address and port
 try: 
     server_socket.bind((HOST, PORT))
 except socket.error as e: 
@@ -29,7 +29,7 @@ except socket.error as e:
 server_socket.setblocking(0)
 
 
-# Listen for incoming connections
+# Listening for incoming connections from the load balancer
 try: 
     server_socket.listen(100)
 except socket.error as e: 
@@ -40,18 +40,22 @@ print("Backend Server is listening at IP: {} Port: {}....".format(HOST,PORT))
 print("\n")
 
 
+# Creating an epoll instance
 try:
-    # Create an epoll instance
+    
     epoll = select.epoll()
     epoll.register(server_socket.fileno(), select.EPOLLIN | select.EPOLLET)
 except OSError as e:
     print("Error in epoll instance: {}".format(e))
     sys.exit(1)
 
+
+# The main execution of the server
 try:
     connections = {}
     while True:
-
+        
+        # Setting the number of max connections
         try:
             events = epoll.poll(MAX_EVENTS)
         except OSError as e:
@@ -59,6 +63,7 @@ try:
             sys.exit(1)
 
         for fileno, event in events:
+        
             # Handle new connections
             if fileno == server_socket.fileno():
                 #   onaccept(function) and choosing server and create connection to the selected server
@@ -80,16 +85,20 @@ try:
                             
                     
                     client_connection.setblocking(0)
-
+                    
+                    # Setting the new connection as unblocking and adding it to the list of open connections
                     client_fd = client_connection.fileno()
                     epoll.register(client_fd, select.EPOLLIN | select.EPOLLET )
                     connections[client_fd] = client_connection
                     print("New Client connection from {} on socket: {}".format(client_address,client_fd))
-
+            
+            # Handle incoming data from the load balancer
             elif event & select.EPOLLIN:
-                # Handle incoming data
+                
                 data = b""
                 while True:
+                
+                    # Reading the incoming data from the load balancer
                     try:
                         chunk = connections[fileno].recv(BUFFER)
                         data += chunk
@@ -99,6 +108,8 @@ try:
                             break
                         else:
                             raise
+                            
+                # If we successfully recieve data, then we forward it to the backend server
                 if data:
                     # on receive data code = receive data and 
                     print("Read Data: {}".format(data)) #Completed the basic step
@@ -116,7 +127,7 @@ try:
                 del connections[fileno]
                 print("\n")
                     
-
+# Closing all of the allocated resources 
 finally:
     epoll.unregister(server_socket.fileno())
     epoll.close()
